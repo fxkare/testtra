@@ -6,6 +6,7 @@ import customtkinter as ctk
 from deep_translator import GoogleTranslator
 import pystray
 from PIL import Image, ImageDraw
+from pynput import mouse
 
 # Uygulama için varsayılan kısayol
 HOTKEY = 'ctrl+alt+t'
@@ -16,14 +17,25 @@ class TranslatorApp:
         self.tray_icon = None
         self.is_running = True
         
-        # Sürükleme (Drag) koordinatları
+        # Sürükleme (Drag) koordinatları (Ana pencere için)
         self.x_offset = 0
         self.y_offset = 0
         
+        # Yüzen buton (Floating Button) değişkenleri
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.drag_start_time = 0
+        self.float_btn_window = None
+        self.last_selected_text = ""
+        
         print("Hızlı Çeviri başlatılıyor...")
         
-        # Hotkey'i kaydet (keyboard kütüphanesi arka planda asenkron çalışır)
+        # 1. Hotkey'i kaydet (Klavyeden tetikleme için)
         keyboard.add_hotkey(HOTKEY, self.on_hotkey_pressed)
+        
+        # 2. Fare dinleyicisini başlat (Seçim tespiti ve dışarı tıklama kontrolü için)
+        self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
+        self.mouse_listener.start()
         
         # Arayüzü kur
         self.init_ui()
@@ -100,6 +112,7 @@ class TranslatorApp:
         self.setup_tray()
         
         print(f"Uygulama arka planda hazır! Bir metin seçin ve '{HOTKEY}' tuşlarına basın.")
+        print("Fare ile sürükleyerek seçim yaptığınızda da yanınızda küçük bir Çeviri butonu belirecektir.")
         
         # Arayüz döngüsü başlatılıyor
         try:
@@ -164,17 +177,33 @@ class TranslatorApp:
         if self.root and self.root.focus_get() is None:
             self.hide_window()
 
+    # Çeviri yap ve göster
+    def translate_and_show(self, text_to_translate):
+        def _thread_job():
+            try:
+                try:
+                    translator = GoogleTranslator(source='auto', target='tr')
+                    translated_text = translator.translate(text_to_translate)
+                except Exception as conn_error:
+                    translated_text = f"Bağlantı Hatası: Çeviri yapılamadı.\nLütfen internet bağlantınızı kontrol edin.\n({conn_error})"
+                
+                # Arayüzü güncelle
+                self.root.after(0, self.show_window, text_to_translate, translated_text)
+            except Exception as e:
+                print(f"Çeviri hatası: {e}")
+                
+        threading.Thread(target=_thread_job, daemon=True).start()
+
+    # Kısayol tetiklendiğinde çalışan fonksiyon
     def process_translation(self):
-        # Kısayol tetiklendiğinde arka plan thread'inde çalışır
         try:
-            # 1. Mevcut panodaki (clipboard) veriyi yedekle
+            # 1. Mevcut panodaki veriyi yedekle
             try:
                 original_clipboard = pyperclip.paste()
             except Exception:
                 original_clipboard = ""
             
             # 2. Seçili metni kopyalamak için Ctrl+C simüle et
-            # Kısayol tuşlarının serbest kalmasını bekle
             keyboard.release('ctrl')
             keyboard.release('alt')
             keyboard.release('t')
@@ -186,7 +215,7 @@ class TranslatorApp:
             # 3. Kopyalanan seçili metni al
             text_to_translate = pyperclip.paste().strip()
             
-            # 4. Orijinal panoyu anında geri yükle (Kullanıcının verisi kaybolmasın)
+            # 4. Orijinal panoyu geri yükle
             if original_clipboard:
                 try:
                     pyperclip.copy(original_clipboard)
@@ -194,18 +223,9 @@ class TranslatorApp:
                     pass
 
             if not text_to_translate:
-                # Çevrilecek metin yoksa pencere açma
                 return
 
-            # 5. Çeviri yap (İnternet/Bağlantı hatası kontrolü ile)
-            try:
-                translator = GoogleTranslator(source='auto', target='tr')
-                translated_text = translator.translate(text_to_translate)
-            except Exception as conn_error:
-                translated_text = f"Bağlantı Hatası: Çeviri yapılamadı.\nLütfen internet bağlantınızı kontrol edin.\n({conn_error})"
-            
-            # 6. Arayüzü ana thread'de güncelle
-            self.root.after(0, self.show_window, text_to_translate, translated_text)
+            self.translate_and_show(text_to_translate)
             
         except Exception as e:
             print(f"Çeviri işlem hatası: {e}")
@@ -214,15 +234,144 @@ class TranslatorApp:
         # Arayüzün donmasını engellemek için işlemi arka planda çalıştır
         threading.Thread(target=self.process_translation, daemon=True).start()
 
+    # fare dinleyicisi olayları
+    def on_mouse_click(self, x, y, button, pressed):
+        # 1. Sol tık basıldı/bırakıldı (Sürükleme - Drag tespiti)
+        if button == mouse.Button.left:
+            if pressed:
+                self.drag_start_x = x
+                self.drag_start_y = y
+                self.drag_start_time = time.time()
+            else:
+                # Sürükleme bitti
+                dx = abs(x - self.drag_start_x)
+                dy = abs(y - self.drag_start_y)
+                dt = time.time() - self.drag_start_time
+                
+                # Eğer kullanıcı belirgin bir sürükleme yaptıysa (örn: 20 pikselden fazla)
+                if (dx > 20 or dy > 20) and dt < 3.0:
+                    # Seçimi arka planda kontrol et
+                    threading.Thread(target=self.check_selection, args=(x, y), daemon=True).start()
+
+        # 2. Yüzen buton açıkken dışarıya tıklanırsa kapatma
+        if pressed and self.float_btn_window:
+            try:
+                bx = self.float_btn_window.winfo_x()
+                by = self.float_btn_window.winfo_y()
+                bw = self.float_btn_window.winfo_width()
+                bh = self.float_btn_window.winfo_height()
+                
+                # Eğer tıklama buton sınırlarının dışındaysa kapat
+                if not (bx <= x <= bx + bw and by <= y <= by + bh):
+                    self.root.after(0, self.hide_float_button)
+            except Exception:
+                pass
+
+    # Seçilen metni belirle ve yüzen butonu tetikle
+    def check_selection(self, x, y):
+        # İşletim sisteminin seçimi tamamlaması için kısa bir bekleme
+        time.sleep(0.08)
+        try:
+            # Pano yedekleme
+            try:
+                original_clipboard = pyperclip.paste()
+            except Exception:
+                original_clipboard = ""
+                
+            # Ctrl+C gönder
+            keyboard.send('ctrl+c')
+            time.sleep(0.15)
+            
+            selected_text = pyperclip.paste().strip()
+            
+            # Panoyu geri yükle
+            if original_clipboard:
+                try:
+                    pyperclip.copy(original_clipboard)
+                except Exception:
+                    pass
+            
+            # Eğer seçilen metin anlamlı uzunluktaysa yüzen butonu göster
+            if selected_text and len(selected_text) > 1:
+                self.root.after(0, self.show_float_button, x, y, selected_text)
+                
+        except Exception as e:
+            print(f"Seçim kontrol hatası: {e}")
+
+    # Yüzen butonu (floating button) göster
+    def show_float_button(self, x, y, text):
+        self.hide_float_button() # Zaten varsa eskisini kapat
+        
+        self.last_selected_text = text
+        
+        # CToplevel oluşturarak çerçevesiz küçük bir buton penceresi yarat
+        self.float_btn_window = ctk.CToplevel(self.root)
+        self.float_btn_window.overrideredirect(True)
+        self.float_btn_window.attributes("-topmost", True)
+        
+        width = 80
+        height = 30
+        self.float_btn_window.geometry(f"{width}x{height}+{x+15}+{y+15}")
+        
+        # Çeviri Butonu
+        btn = ctk.CTkButton(
+            self.float_btn_window, 
+            text="Çevir", 
+            width=width, 
+            height=height, 
+            corner_radius=8,
+            command=self.on_float_click,
+            fg_color="#3a7ebf",
+            hover_color="#2b5c8f",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        btn.pack(fill="both", expand=True)
+        
+        # Fare uzaklaşma kontrolünü başlat
+        self.check_distance()
+
+    # Yüzen butona tıklanma olayı
+    def on_float_click(self):
+        text = self.last_selected_text
+        self.hide_float_button()
+        if text:
+            self.translate_and_show(text)
+
+    # Yüzen butonu gizle
+    def hide_float_button(self):
+        if self.float_btn_window:
+            try:
+                self.float_btn_window.destroy()
+            except Exception:
+                pass
+            self.float_btn_window = None
+
+    # Farenin butondan uzaklaşıp uzaklaşmadığını kontrol et
+    def check_distance(self):
+        if not self.float_btn_window:
+            return
+        try:
+            mx, my = self.root.winfo_pointerxy()
+            bx = self.float_btn_window.winfo_x() + 40
+            by = self.float_btn_window.winfo_y() + 15
+            dist = ((mx - bx)**2 + (my - by)**2)**0.5
+            
+            # Fare 150 pikselden fazla uzaklaşırsa butonu gizle
+            if dist > 150:
+                self.hide_float_button()
+            else:
+                self.root.after(200, self.check_distance)
+        except Exception:
+            pass
+
     def setup_tray(self):
-        # 64x64 boyutunda sistem tepsisi ikonu çizelim (Dünya simgesi benzeri)
+        # Sistem tepsisi simgesi çiz
         image = Image.new('RGB', (64, 64), color=(30, 30, 30))
         draw = ImageDraw.Draw(image)
         draw.ellipse([8, 8, 56, 56], fill="#3a7ebf", outline="white", width=4)
         draw.line([32, 8, 32, 56], fill="white", width=3)
         draw.line([8, 32, 56, 32], fill="white", width=3)
         
-        # Sağ tık menüsü
         menu = pystray.Menu(
             pystray.MenuItem("Göster", self.show_window_from_tray),
             pystray.MenuItem("Çıkış", self.quit_app)
@@ -232,16 +381,18 @@ class TranslatorApp:
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def show_window_from_tray(self):
-        # Sistem tepsisinden manuel açıldığında bilgilendirme metni göster
         self.root.after(0, self.show_window, 
-                        "Bir metin seçip Ctrl+Alt+T tuşlarına basın.", 
+                        "Bir metin seçip Ctrl+Alt+T tuşlarına basın veya metni sürükleyip Çevir butonunu tıklayın.", 
                         "Sistem tepsisinden manuel olarak açıldı. Çeviri sistemi aktif olarak arka planda beklemektedir.")
 
     def quit_app(self):
         self.is_running = False
         keyboard.unhook_all()
+        if self.mouse_listener:
+            self.mouse_listener.stop()
         if self.tray_icon:
             self.tray_icon.stop()
+        self.hide_float_button()
         if self.root:
             self.root.after(0, self.root.destroy)
 
