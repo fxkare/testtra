@@ -1,0 +1,6 @@
+customtkinter
+keyboard
+pyperclip
+deep-translator
+pystray
+Pillow
