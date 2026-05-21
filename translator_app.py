@@ -21,10 +21,11 @@ class TranslatorApp:
         self.x_offset = 0
         self.y_offset = 0
         
-        # Yüzen buton (Floating Button) değişkenleri
+        # Yüzen buton (Floating Button) ve seçim değişkenleri
         self.drag_start_x = 0
         self.drag_start_y = 0
         self.drag_start_time = 0
+        self.last_click_time = 0
         self.float_btn_window = None
         self.last_selected_text = ""
         
@@ -112,7 +113,7 @@ class TranslatorApp:
         self.setup_tray()
         
         print(f"Uygulama arka planda hazır! Bir metin seçin ve '{HOTKEY}' tuşlarına basın.")
-        print("Fare ile sürükleyerek seçim yaptığınızda da yanınızda küçük bir Çeviri butonu belirecektir.")
+        print("Fare ile metin veya paragraf seçtiğinizde de yanınızda küçük bir Çeviri butonu belirecektir.")
         
         # Arayüz döngüsü başlatılıyor
         try:
@@ -234,22 +235,29 @@ class TranslatorApp:
         # Arayüzün donmasını engellemek için işlemi arka planda çalıştır
         threading.Thread(target=self.process_translation, daemon=True).start()
 
-    # fare dinleyicisi olayları
+    # Fare dinleyicisi olayları
     def on_mouse_click(self, x, y, button, pressed):
-        # 1. Sol tık basıldı/bırakıldı (Sürükleme - Drag tespiti)
+        # 1. Sol tık basıldı/bırakıldı (Sürükleme veya Çift/Üçlü tıklama tespiti)
         if button == mouse.Button.left:
             if pressed:
                 self.drag_start_x = x
                 self.drag_start_y = y
                 self.drag_start_time = time.time()
             else:
-                # Sürükleme bitti
+                # Sol tık bırakıldı
                 dx = abs(x - self.drag_start_x)
                 dy = abs(y - self.drag_start_y)
                 dt = time.time() - self.drag_start_time
                 
-                # Eğer kullanıcı belirgin bir sürükleme yaptıysa (örn: 20 pikselden fazla)
-                if (dx > 20 or dy > 20) and dt < 3.0:
+                # Çift veya üçlü tıklama tespiti (Çift tıklama 350ms içinde yapılır)
+                current_time = time.time()
+                is_double_click = False
+                if current_time - self.last_click_time < 0.35:
+                    is_double_click = True
+                self.last_click_time = current_time
+                
+                # Eğer belirgin sürükleme varsa veya çift/üçlü tıklama olduysa tetikle
+                if (dx > 8 or dy > 8) or is_double_click:
                     # Seçimi arka planda kontrol et
                     threading.Thread(target=self.check_selection, args=(x, y), daemon=True).start()
 
@@ -272,22 +280,46 @@ class TranslatorApp:
         # İşletim sisteminin seçimi tamamlaması için kısa bir bekleme
         time.sleep(0.08)
         try:
-            # Pano yedekleme
+            # 1. Pano yedekleme
             try:
                 original_clipboard = pyperclip.paste()
             except Exception:
                 original_clipboard = ""
+            
+            # 2. Panoyu geçici olarak temizle
+            try:
+                pyperclip.copy("")
+            except Exception:
+                pass
                 
-            # Ctrl+C gönder
+            # 3. Ctrl+C göndererek kopyalamayı tetikle
+            keyboard.release('ctrl')
+            keyboard.release('shift')
+            keyboard.release('alt')
             keyboard.send('ctrl+c')
-            time.sleep(0.15)
             
-            selected_text = pyperclip.paste().strip()
+            # 4. Kopyalamanın gerçekleşmesini bekle (maksimum 250ms boyunca sorgula)
+            selected_text = ""
+            start_poll = time.time()
+            while time.time() - start_poll < 0.25:
+                try:
+                    txt = pyperclip.paste().strip()
+                    if txt != "":
+                        selected_text = txt
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.02)
             
-            # Panoyu geri yükle
+            # 5. Panoyu hemen eski haline geri yükle (Kullanıcı verisi bozulmasın)
             if original_clipboard:
                 try:
                     pyperclip.copy(original_clipboard)
+                except Exception:
+                    pass
+            else:
+                try:
+                    pyperclip.copy("")
                 except Exception:
                     pass
             
@@ -304,13 +336,14 @@ class TranslatorApp:
         
         self.last_selected_text = text
         
-        # CToplevel oluşturarak çerçevesiz küçük bir buton penceresi yarat
-        self.float_btn_window = ctk.CToplevel(self.root)
+        # CTkToplevel kullanarak çerçevesiz küçük bir buton penceresi yarat (Typo düzeltildi!)
+        self.float_btn_window = ctk.CTkToplevel(self.root)
         self.float_btn_window.overrideredirect(True)
         self.float_btn_window.attributes("-topmost", True)
         
         width = 80
         height = 30
+        # Butonu imlecin hafif sağına ve altına yerleştir
         self.float_btn_window.geometry(f"{width}x{height}+{x+15}+{y+15}")
         
         # Çeviri Butonu
