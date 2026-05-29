@@ -1,0 +1,7 @@
+customtkinter
+pyperclip
+deep-translator
+pystray
+Pillow
+pynput
+pyinstaller

@@ -1,30 +1,52 @@
 import time
 import threading
-import ctypes
 import sys
-import keyboard
+import os
+import tempfile
+
+if sys.platform == "win32":
+    import ctypes
+    import keyboard as system_keyboard
+else:
+    ctypes = None
+    system_keyboard = None
+
 import pyperclip
 import customtkinter as ctk
 from deep_translator import GoogleTranslator
 import pystray
 from PIL import Image, ImageDraw
-from pynput import mouse
+from pynput import mouse, keyboard as pynput_keyboard
 
 # Uygulama için varsayılan kısayol
 HOTKEY = 'ctrl+alt+space'
+HOTKEY_DISPLAY = "Ctrl+Alt+Space"
 MUTEX_NAME = "Global\\HizliCeviriTranslatorApp"
+LOCK_FILE_NAME = "hizli_ceviri.lock"
 
 
 def ensure_single_instance():
-    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
-    if ctypes.windll.kernel32.GetLastError() == 183:
+    if sys.platform == "win32":
+        mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if ctypes.windll.kernel32.GetLastError() == 183:
+            sys.exit(0)
+        return mutex
+
+    import fcntl
+
+    lock_file = open(os.path.join(tempfile.gettempdir(), LOCK_FILE_NAME), "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
         sys.exit(0)
-    return mutex
+    return lock_file
 
 class TranslatorApp:
     def __init__(self):
         self.root = None
         self.tray_icon = None
+        self.keyboard_hotkey_listener = None
+        self.input_controller = pynput_keyboard.Controller()
         self.is_running = True
         
         # Sürükleme (Drag) koordinatları (Ana pencere için)
@@ -42,7 +64,7 @@ class TranslatorApp:
         print("Hızlı Çeviri başlatılıyor...")
         
         # 1. Hotkey'i kaydet (Klavyeden tetikleme için)
-        keyboard.add_hotkey(HOTKEY, self.on_hotkey_pressed)
+        self.start_hotkey_listener()
         
         # 2. Fare dinleyicisini başlat (Seçim tespiti ve dışarı tıklama kontrolü için)
         self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
@@ -50,6 +72,55 @@ class TranslatorApp:
         
         # Arayüzü kur
         self.init_ui()
+
+    def start_hotkey_listener(self):
+        if sys.platform == "win32":
+            system_keyboard.add_hotkey(HOTKEY, self.on_hotkey_pressed)
+            return
+
+        self.keyboard_hotkey_listener = pynput_keyboard.GlobalHotKeys({
+            '<ctrl>+<alt>+<space>': self.on_hotkey_pressed
+        })
+        self.keyboard_hotkey_listener.start()
+
+    def release_modifiers(self):
+        if sys.platform == "win32":
+            for key in ('ctrl', 'shift', 'alt', 'space', 't'):
+                try:
+                    system_keyboard.release(key)
+                except Exception:
+                    pass
+            return
+
+        for key in (
+            pynput_keyboard.Key.ctrl,
+            pynput_keyboard.Key.ctrl_l,
+            pynput_keyboard.Key.ctrl_r,
+            pynput_keyboard.Key.shift,
+            pynput_keyboard.Key.shift_l,
+            pynput_keyboard.Key.shift_r,
+            pynput_keyboard.Key.alt,
+            pynput_keyboard.Key.alt_l,
+            pynput_keyboard.Key.alt_r,
+            pynput_keyboard.Key.space,
+        ):
+            try:
+                self.input_controller.release(key)
+            except Exception:
+                pass
+
+    def copy_selected_text_to_clipboard(self):
+        self.release_modifiers()
+        time.sleep(0.05)
+
+        if sys.platform == "win32":
+            system_keyboard.send('ctrl+c')
+            return
+
+        self.input_controller.press(pynput_keyboard.Key.ctrl)
+        self.input_controller.press('c')
+        self.input_controller.release('c')
+        self.input_controller.release(pynput_keyboard.Key.ctrl)
 
     def init_ui(self):
         # Arayüz (UI) hazırlığı
@@ -122,7 +193,7 @@ class TranslatorApp:
         # Sistem tepsisi simgesini başlat
         self.setup_tray()
         
-        print(f"Uygulama arka planda hazır! Bir metin seçin ve '{HOTKEY}' tuşlarına basın.")
+        print(f"Uygulama arka planda hazır! Bir metin seçin ve '{HOTKEY_DISPLAY}' tuşlarına basın.")
         print("Fare ile metin veya paragraf seçtiğinizde de yanınızda küçük bir Çeviri butonu belirecektir.")
         
         # Arayüz döngüsü başlatılıyor
@@ -215,12 +286,7 @@ class TranslatorApp:
                 original_clipboard = ""
             
             # 2. Seçili metni kopyalamak için Ctrl+C simüle et
-            keyboard.release('ctrl')
-            keyboard.release('alt')
-            keyboard.release('t')
-            time.sleep(0.05)
-            
-            keyboard.send('ctrl+c')
+            self.copy_selected_text_to_clipboard()
             time.sleep(0.15) # Kopyalama işleminin panoya yansıması için bekle
             
             # 3. Kopyalanan seçili metni al
@@ -303,10 +369,7 @@ class TranslatorApp:
                 pass
                 
             # 3. Ctrl+C göndererek kopyalamayı tetikle
-            keyboard.release('ctrl')
-            keyboard.release('shift')
-            keyboard.release('alt')
-            keyboard.send('ctrl+c')
+            self.copy_selected_text_to_clipboard()
             
             # 4. Kopyalamanın gerçekleşmesini bekle (maksimum 250ms boyunca sorgula)
             selected_text = ""
@@ -425,12 +488,15 @@ class TranslatorApp:
 
     def show_window_from_tray(self):
         self.root.after(0, self.show_window, 
-                        "Bir metin seçip Ctrl+Alt+T tuşlarına basın veya metni sürükleyip Çevir butonunu tıklayın.", 
+                        f"Bir metin seçip {HOTKEY_DISPLAY} tuşlarına basın veya metni sürükleyip Çevir butonunu tıklayın.", 
                         "Sistem tepsisinden manuel olarak açıldı. Çeviri sistemi aktif olarak arka planda beklemektedir.")
 
     def quit_app(self):
         self.is_running = False
-        keyboard.unhook_all()
+        if sys.platform == "win32":
+            system_keyboard.unhook_all()
+        if self.keyboard_hotkey_listener:
+            self.keyboard_hotkey_listener.stop()
         if self.mouse_listener:
             self.mouse_listener.stop()
         if self.tray_icon:
