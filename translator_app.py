@@ -1,5 +1,7 @@
 import time
 import threading
+import ctypes
+import sys
 import keyboard
 import pyperclip
 import customtkinter as ctk
@@ -9,7 +11,15 @@ from PIL import Image, ImageDraw
 from pynput import mouse
 
 # Uygulama için varsayılan kısayol
-HOTKEY = 'ctrl+alt+t'
+HOTKEY = 'ctrl+alt+space'
+MUTEX_NAME = "Global\\HizliCeviriTranslatorApp"
+
+
+def ensure_single_instance():
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if ctypes.windll.kernel32.GetLastError() == 183:
+        sys.exit(0)
+    return mutex
 
 class TranslatorApp:
     def __init__(self):
@@ -430,4 +440,5 @@ class TranslatorApp:
             self.root.after(0, self.root.destroy)
 
 if __name__ == "__main__":
+    app_mutex = ensure_single_instance()
     app = TranslatorApp()
